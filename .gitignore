@@ -16,5 +16,8 @@ wheels/
 # The leading "/" means only the top-level notes folder, not tests/fixtures/notes.
 /notes/
 
+# Personal flashcards and review history (the user's own data, not code)
+/data/
+
 # Downloaded embedding model and saved note vectors (rebuilt automatically)
 .cache/

@@ -22,6 +22,7 @@ def use_fixture_notes(monkeypatch, tmp_path):
     """
     monkeypatch.setattr(server, "NOTES_DIR", FIXTURE_NOTES.resolve())
     monkeypatch.setattr(server, "VECTOR_DIR", tmp_path / "vectors")
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path / "data")
     server._load_vectors.cache_clear()
 
 
@@ -42,6 +43,11 @@ async def test_lists_all_tools():
             "read_note",
             "search_notes",
             "semantic_search",
+            "add_flashcard",
+            "get_due_cards",
+            "grade_card",
+            "delete_flashcard",
+            "card_stats",
         }
 
 
@@ -202,3 +208,34 @@ def test_split_cuts_between_lines_and_keeps_line_numbers():
     assert server._split(text, max_chars=9) == [(1, "aaaa\nbbbb"), (3, "\ncccc"), (5, "dddd")]
     assert server._split("short\nnote") == [(1, "short\nnote")]
     assert server._split("\n\n  \n") == []
+
+
+async def test_flashcard_quiz_round_trip():
+    added = text_of(await call("add_flashcard", {
+        "question": "What data structure does BFS use?",
+        "answer": "A queue",
+        "source": "slides.pptx (slide 2)",
+    }))
+    assert added == "Added card #1, due today."
+
+    due = text_of(await call("get_due_cards"))
+    assert "#1 [slides.pptx (slide 2)]\nQ: What data structure does BFS use?\nA: A queue" in due
+
+    graded = text_of(await call("grade_card", {"card_id": 1, "quality": 5}))
+    assert graded.startswith("Card #1: next review tomorrow (")
+    assert text_of(await call("get_due_cards")) == "No cards due today."
+
+    stats = text_of(await call("card_stats"))
+    assert "1 cards: 0 due now, 0 never reviewed, 1 reviews done today." in stats
+
+
+async def test_flashcard_errors_reach_the_ai():
+    result = await call("grade_card", {"card_id": 42, "quality": 5})
+    assert result.is_error
+    assert "No card #42" in text_of(result)
+
+
+async def test_delete_flashcard():
+    await call("add_flashcard", {"question": "Q", "answer": "A"})
+    assert text_of(await call("delete_flashcard", {"card_id": 1})) == "Deleted card #1: Q"
+    assert "0 cards" in text_of(await call("card_stats"))

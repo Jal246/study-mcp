@@ -8,7 +8,9 @@ import logging
 import os
 import re
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 
@@ -18,6 +20,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 import pypdfium2 as pdfium
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+from study_mcp.flashcards import Card, CardError, Deck
 
 # Where the notes live. Override with the STUDY_NOTES_DIR environment variable.
 DEFAULT_NOTES_DIR = Path(__file__).resolve().parents[2] / "notes"
@@ -47,6 +51,11 @@ CHUNK_CHARS = 1000
 # while real matches score about 0.65 and up. Results below this are dropped.
 MIN_SCORE = 0.6
 
+# Flashcards and their review history. Unlike .cache, this is the user's own work and can't be
+# rebuilt, so it gets its own folder. Override with STUDY_DATA_DIR.
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+DATA_DIR = Path(os.environ.get("STUDY_DATA_DIR", DEFAULT_DATA_DIR)).resolve()
+
 # The model download logs every HTTP request; keep that noise out of the server's logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -59,7 +68,11 @@ mcp = MCPServer(
         "concepts in the user's own words (it matches meaning, not exact words), and search_notes "
         "for an exact term or formula. Use read_note to read a note (for PDFs you can read just "
         "some pages or slides). When answering from notes, say which note and page or slide the "
-        "answer came from."
+        "answer came from. "
+        "Flashcards: when the user asks for cards, write short question/answer pairs from the "
+        "notes and save each with add_flashcard (with its source). To quiz the user, call "
+        "get_due_cards, ask ONE question at a time without showing the answer, wait for their "
+        "reply, tell them if they were right, then grade_card it before the next question."
     ),
 )
 
@@ -364,3 +377,99 @@ def semantic_search(query: str, max_results: int = 5) -> str:
             snippet = snippet[:300] + "..."
         results.append(f"[{score:.2f}] {chunk.where}: {snippet}")
     return "\n\n".join(results) if results else f"Nothing in the notes seems related to '{query}'."
+
+
+def _deck() -> Deck:
+    return Deck(DATA_DIR / "flashcards.db")
+
+
+@contextmanager
+def _card_errors():
+    """Turn flashcard problems (unknown id, bad grade...) into messages the AI can see."""
+    try:
+        yield
+    except CardError as error:
+        raise ToolError(str(error)) from error
+
+
+def _next_review(card: Card) -> str:
+    days = (card.due - date.today()).days
+    when = "tomorrow" if days == 1 else f"in {days} days"
+    return f"next review {when} ({card.due.isoformat()})"
+
+
+@mcp.tool()
+def add_flashcard(question: str, answer: str, source: str = "") -> str:
+    """Save a flashcard for spaced-repetition review. New cards are due today.
+
+    Keep cards small: one fact per card, a question with one clear answer.
+
+    Args:
+        question: E.g. "What data structure does BFS use?"
+        answer: E.g. "A queue (first in, first out)."
+        source: Where it came from, as shown by the search tools, e.g. "slides.pptx (slide 2)".
+    """
+    with _card_errors():
+        card = _deck().add(question, answer, source, date.today())
+    return f"Added card #{card.id}, due today."
+
+
+@mcp.tool()
+def get_due_cards(limit: int = 10) -> str:
+    """List the flashcards due for review today, most overdue first, with their answers.
+
+    The answers are for you to check the user's reply: ask the questions one at a time and don't
+    reveal an answer until the user has tried. Then call grade_card.
+
+    Args:
+        limit: Maximum number of cards to return.
+    """
+    cards = _deck().due(date.today(), limit)
+    if not cards:
+        return "No cards due today."
+    lines = [f"{len(cards)} cards due:"]
+    for card in cards:
+        source = f" [{card.source}]" if card.source else ""
+        lines.append(f"#{card.id}{source}\nQ: {card.question}\nA: {card.answer}")
+    return "\n\n".join(lines)
+
+
+@mcp.tool()
+def grade_card(card_id: int, quality: int) -> str:
+    """Record how well the user answered a card; this schedules its next review.
+
+    Args:
+        card_id: The card's number, from get_due_cards.
+        quality: 5 = instant and correct, 4 = correct after some thought, 3 = correct but hard,
+            2 = wrong but the answer felt familiar, 1 = wrong, 0 = no idea.
+    """
+    with _card_errors():
+        card = _deck().grade(card_id, quality, date.today())
+    return f"Card #{card.id}: {_next_review(card)}."
+
+
+@mcp.tool()
+def delete_flashcard(card_id: int) -> str:
+    """Delete a flashcard (e.g. one that is wrong or a duplicate) and its review history.
+
+    Args:
+        card_id: The card's number.
+    """
+    with _card_errors():
+        card = _deck().delete(card_id)
+    return f"Deleted card #{card.id}: {card.question}"
+
+
+@mcp.tool()
+def card_stats() -> str:
+    """Summarize flashcard progress: totals, cards due, today's reviews, and the cards the user
+    forgets most often (worth extra attention or rewriting)."""
+    stats = _deck().stats(date.today())
+    lines = [
+        f"{stats['total']} cards: {stats['due']} due now, {stats['new']} never reviewed, "
+        f"{stats['reviewed_today']} reviews done today."
+    ]
+    if stats["struggling"]:
+        lines.append("Forgotten most often:")
+        lines += [f"#{c.id} ({c.lapses}x forgotten): {c.question}" for c in stats["struggling"]]
+    return "\n".join(lines)
