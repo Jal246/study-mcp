@@ -1,0 +1,25 @@
+[project]
+name = "study-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jal246", email = "181914226+Jal246@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "mcp[cli]>=2.3.0",
+    "pypdfium2>=5.14.0",
+]
+
+[project.scripts]
+study-mcp = "study_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
