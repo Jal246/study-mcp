@@ -1,2 +1,3 @@
 # PDFs store byte offsets, so git must never rewrite their line endings.
 *.pdf binary
+*.pptx binary

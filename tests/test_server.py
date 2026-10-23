@@ -50,6 +50,39 @@ async def test_list_notes():
     assert "biology/photosynthesis.md" in out
     assert "cs/big-o.md" in out
     assert "lecture.pdf (PDF, 3 pages)" in out
+    assert "slides.pptx (PowerPoint, 3 slides)" in out
+
+
+async def test_read_slides_marks_slides_and_finds_all_text():
+    out = text_of(await call("read_note", {"path": "slides.pptx"}))
+    assert "--- Slide 1 ---\nGraph Traversal\nWeek 7: exploring every vertex" in out
+    assert "Speaker notes:\nBFS keeps the frontier in a queue" in out  # Speaker notes.
+    assert "BFS vs DFS" in out  # Text inside a group shape.
+    assert "DFS | Stack" in out  # Table rows.
+
+
+async def test_read_slide_range():
+    out = text_of(await call("read_note", {"path": "slides.pptx", "start_page": 2, "end_page": 2}))
+    assert "--- Slide 2 ---" in out
+    assert "Graph Traversal" not in out
+    assert "Stack" not in out
+
+
+async def test_read_slides_invalid_range():
+    result = await call("read_note", {"path": "slides.pptx", "start_page": 4})
+    assert result.is_error
+    assert "has slides 1-3" in text_of(result)
+
+
+async def test_search_slides_shows_slide_number():
+    out = text_of(await call("search_notes", {"query": "queue"}))
+    assert "slides.pptx (slide 2): BFS keeps the frontier in a queue" in out
+    assert "slides.pptx (slide 3): BFS | Queue" in out
+
+
+async def test_semantic_search_finds_slides():
+    out = text_of(await call("semantic_search", {"query": "shortest route between two nodes"}))
+    assert "slides.pptx (slide 2)" in first_result(out)
 
 
 async def test_read_note():
@@ -155,7 +188,7 @@ async def test_semantic_search_empty_query():
 async def test_semantic_search_saves_vectors_and_reuses_them():
     await call("semantic_search", {"query": "gcd"})
     saved = sorted(server.VECTOR_DIR.glob("*.npy"))
-    assert len(saved) == 4  # One file per note.
+    assert len(saved) == 5  # One file per note.
     modified = [p.stat().st_mtime_ns for p in saved]
 
     server._load_vectors.cache_clear()  # Forget the in-memory copy, like a server restart.

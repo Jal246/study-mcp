@@ -16,15 +16,18 @@ import numpy as np
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 import pypdfium2 as pdfium
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 # Where the notes live. Override with the STUDY_NOTES_DIR environment variable.
 DEFAULT_NOTES_DIR = Path(__file__).resolve().parents[2] / "notes"
 NOTES_DIR = Path(os.environ.get("STUDY_NOTES_DIR", DEFAULT_NOTES_DIR)).resolve()
 
-# File types we know how to read.
+# File types we know how to read. Text files are one piece; PDFs and slide decks are split into
+# numbered pieces, and this says what to call them: (file kind, piece name).
 TEXT_EXTENSIONS = {".md", ".txt"}
-PDF_EXTENSIONS = {".pdf"}
-NOTE_EXTENSIONS = TEXT_EXTENSIONS | PDF_EXTENSIONS
+PAGED_EXTENSIONS = {".pdf": ("PDF", "page"), ".pptx": ("PowerPoint", "slide")}
+NOTE_EXTENSIONS = TEXT_EXTENSIONS | PAGED_EXTENSIONS.keys()
 
 # read_note stops after this many characters so one huge PDF can't flood the AI's context.
 MAX_READ_CHARS = 40_000
@@ -51,11 +54,12 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 mcp = MCPServer(
     name="study-helper",
     instructions=(
-        "Tools for the user's personal study notes (text files and PDF lecture slides). "
+        "Tools for the user's personal study notes (text files, PDFs and PowerPoint slides). "
         "Use list_notes to see what exists. To find things, use semantic_search for questions and "
         "concepts in the user's own words (it matches meaning, not exact words), and search_notes "
         "for an exact term or formula. Use read_note to read a note (for PDFs you can read just "
-        "some pages). When answering from notes, say which note and page the answer came from."
+        "some pages or slides). When answering from notes, say which note and page or slide the "
+        "answer came from."
     ),
 )
 
@@ -70,16 +74,49 @@ def _normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
+def _shape_lines(shapes) -> list[str]:
+    """All text on a slide, in the order the shapes were added.
+
+    Text hides in three places: text boxes (titles and bullets), tables, and groups of shapes,
+    which can contain any of these, including more groups.
+    """
+    lines = []
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            lines.extend(_shape_lines(shape.shapes))
+        elif shape.has_text_frame:
+            lines.append(shape.text_frame.text)
+        elif shape.has_table:
+            lines.extend(" | ".join(cell.text for cell in row.cells) for row in shape.table.rows)
+    return lines
+
+
+def _slide_texts(path: Path) -> list[str]:
+    """One string per slide: the slide's text, then its speaker notes (often the lecturer's
+    actual explanation of the slide)."""
+    texts = []
+    for slide in Presentation(str(path)).slides:
+        lines = _shape_lines(slide.shapes)
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+            lines += ["Speaker notes:", slide.notes_slide.notes_text_frame.text]
+        # PowerPoint stores a line break inside a paragraph (Shift+Enter) as a vertical tab.
+        texts.append("\n".join(lines).replace("\v", "\n"))
+    return texts
+
+
 @lru_cache(maxsize=64)
 def _load_pages(path: Path, modified_ns: int) -> list[str]:
-    """Return a note's text as a list of pages (text files count as one page).
+    """Return a note's text as a list of pages or slides (text files count as one page).
 
-    PDF text extraction is slow, so results are cached. `modified_ns` (the file's last-modified
+    Text extraction is slow, so results are cached. `modified_ns` (the file's last-modified
     time) is part of the cache key: when the file changes, the key changes and we re-read it.
     """
-    if path.suffix.lower() in PDF_EXTENSIONS:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
         with pdfium.PdfDocument(path) as pdf:
             return [_normalize(page.get_textpage().get_text_range()) for page in pdf]
+    if suffix == ".pptx":
+        return [_normalize(text) for text in _slide_texts(path)]
     return [_normalize(path.read_text(encoding="utf-8"))]
 
 
@@ -87,8 +124,9 @@ def _pages(path: Path) -> list[str]:
     return _load_pages(path, path.stat().st_mtime_ns)
 
 
-def _is_pdf(path: Path) -> bool:
-    return path.suffix.lower() in PDF_EXTENSIONS
+def _paged(path: Path) -> tuple[str, str] | None:
+    """(file kind, piece name), e.g. ("PDF", "page"), for notes split into pieces; None for text."""
+    return PAGED_EXTENSIONS.get(path.suffix.lower())
 
 
 def _all_notes() -> list[Path]:
@@ -101,6 +139,13 @@ def _all_notes() -> list[Path]:
 def _name(path: Path) -> str:
     """A note's path relative to NOTES_DIR, with forward slashes, e.g. "math/module4.pdf"."""
     return path.relative_to(NOTES_DIR).as_posix()
+
+
+def _where(path: Path, page_no: int, line_no: int) -> str:
+    """Where a match is, for the user: "deck.pptx (slide 2)", "a.pdf (page 3)" or "notes.md:12"."""
+    if paged := _paged(path):
+        return f"{_name(path)} ({paged[1]} {page_no})"
+    return f"{_name(path)}:{line_no}"
 
 
 def _safe_path(relative_path: str) -> Path:
@@ -118,43 +163,49 @@ def _safe_path(relative_path: str) -> Path:
 
 @mcp.tool()
 def list_notes() -> str:
-    """List all study notes, with their paths and sizes (page counts for PDFs)."""
+    """List all study notes, with their paths and sizes (page or slide counts for PDFs and decks)."""
     notes = _all_notes()
     if not notes:
         return f"No notes found in {NOTES_DIR}"
     lines = []
     for p in notes:
-        detail = f"PDF, {len(_pages(p))} pages" if _is_pdf(p) else f"{p.stat().st_size} bytes"
+        if paged := _paged(p):
+            kind, piece = paged
+            detail = f"{kind}, {len(_pages(p))} {piece}s"
+        else:
+            detail = f"{p.stat().st_size} bytes"
         lines.append(f"{_name(p)} ({detail})")
     return f"{len(notes)} notes in {NOTES_DIR}:\n" + "\n".join(lines)
 
 
 @mcp.tool()
 def read_note(path: str, start_page: int | None = None, end_page: int | None = None) -> str:
-    """Read the text of one note. For PDFs, optionally read only a range of pages.
+    """Read the text of one note. For PDFs and slide decks, optionally read only a range of
+    pages (for decks, page numbers are slide numbers).
 
     Args:
         path: The note's path as shown by list_notes, e.g. "math/module4.pdf".
-        start_page: First page to read (PDFs only, starts at 1). Defaults to the first page.
-        end_page: Last page to read, inclusive (PDFs only). Defaults to the last page.
+        start_page: First page or slide to read (starts at 1). Defaults to the first.
+        end_page: Last page or slide to read, inclusive. Defaults to the last.
     """
     note = _safe_path(path)
     pages = _pages(note)
-    if not _is_pdf(note):
+    if not (paged := _paged(note)):
         return pages[0]
+    piece = paged[1]
 
     first = start_page or 1
     last = end_page or len(pages)
     if not 1 <= first <= last <= len(pages):
-        raise ToolError(f"Invalid page range {first}-{last}: '{path}' has pages 1-{len(pages)}")
+        raise ToolError(f"Invalid {piece} range {first}-{last}: '{path}' has {piece}s 1-{len(pages)}")
 
     parts = []
     total = 0
     for number in range(first, last + 1):
-        chunk = f"--- Page {number} ---\n{pages[number - 1].strip()}\n"
+        chunk = f"--- {piece.title()} {number} ---\n{pages[number - 1].strip()}\n"
         if total + len(chunk) > MAX_READ_CHARS:
             parts.append(
-                f"[Stopped at page {number - 1} to stay under {MAX_READ_CHARS} characters. "
+                f"[Stopped at {piece} {number - 1} to stay under {MAX_READ_CHARS} characters. "
                 f"Call read_note again with start_page={number} to continue.]"
             )
             break
@@ -165,11 +216,12 @@ def read_note(path: str, start_page: int | None = None, end_page: int | None = N
 
 @mcp.tool()
 def search_notes(query: str, max_results: int = 10) -> str:
-    """Search all notes (including PDFs) for a whole word or phrase, case-insensitive.
+    """Search all notes (including PDFs and slides) for a whole word or phrase, case-insensitive.
 
     Matches whole words only: "mod" finds "7 mod 3" but not "Module".
 
-    Each result shows where the match is: "note:line" for text files, "note (page N)" for PDFs.
+    Each result shows where the match is: "note:line" for text files, "note (page N)" for PDFs,
+    "note (slide N)" for slide decks.
 
     Args:
         query: Text to look for, e.g. "chlorophyll".
@@ -188,8 +240,7 @@ def search_notes(query: str, max_results: int = 10) -> str:
             for line_no, line in enumerate(page.splitlines(), start=1):
                 if not pattern.search(line):
                     continue
-                where = f"{_name(note)} (page {page_no})" if _is_pdf(note) else f"{_name(note)}:{line_no}"
-                matches.append(f"{where}: {line.strip()}")
+                matches.append(f"{_where(note, page_no, line_no)}: {line.strip()}")
                 if len(matches) >= max_results:
                     return "\n".join(matches) + f"\n(stopped after {max_results} results)"
 
@@ -198,7 +249,7 @@ def search_notes(query: str, max_results: int = 10) -> str:
 
 @dataclass(frozen=True)
 class Chunk:
-    where: str  # Location to show the user: "note (page N)" for PDFs, "note:line" for text files.
+    where: str  # Location to show the user, from _where: "note (page N)", "note:line", ...
     text: str
 
 
@@ -225,13 +276,11 @@ def _split(text: str, max_chars: int = CHUNK_CHARS) -> list[tuple[int, str]]:
 
 
 def _chunks(path: Path) -> list[Chunk]:
-    """Cut a note into chunks small enough to embed. PDF chunks never cross a page boundary."""
-    name = _name(path)
+    """Cut a note into chunks small enough to embed. Chunks never cross a page or slide boundary."""
     chunks = []
     for page_no, page in enumerate(_pages(path), start=1):
         for line_no, piece in _split(page):
-            where = f"{name} (page {page_no})" if _is_pdf(path) else f"{name}:{line_no}"
-            chunks.append(Chunk(where, piece))
+            chunks.append(Chunk(_where(path, page_no, line_no), piece))
     return chunks
 
 
