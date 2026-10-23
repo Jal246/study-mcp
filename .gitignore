@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Extra working copies Claude Code creates for background jobs
+.claude/worktrees/
+
 # Personal study notes (may contain copyrighted course material) — never commit.
 # The leading "/" means only the top-level notes folder, not tests/fixtures/notes.
 /notes/
