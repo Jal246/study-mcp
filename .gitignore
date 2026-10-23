@@ -9,5 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-# Personal study notes (may contain copyrighted course material) — never commit
-notes/
+# Personal study notes (may contain copyrighted course material) — never commit.
+# The leading "/" means only the top-level notes folder, not tests/fixtures/notes.
+/notes/
