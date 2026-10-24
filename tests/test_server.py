@@ -48,6 +48,8 @@ async def test_lists_all_tools():
             "grade_card",
             "delete_flashcard",
             "card_stats",
+            "record_quiz_answer",
+            "weak_topics",
         }
 
 
@@ -281,3 +283,16 @@ async def test_delete_flashcard():
     await call("add_flashcard", {"question": "Q", "answer": "A"})
     assert text_of(await call("delete_flashcard", {"card_id": 1})) == "Deleted card #1: Q"
     assert "0 cards" in text_of(await call("card_stats"))
+
+
+async def test_quiz_answers_show_up_in_weak_topics():
+    assert text_of(await call("weak_topics")) == "No quiz answers saved yet."
+    saved = text_of(await call("record_quiz_answer", {
+        "topic": "RSA", "question": "Find d for e=3, phi=40", "correct": False, "mistake": "used phi=55",
+    }))
+    assert saved == "Saved: wrong on RSA."
+    await call("record_quiz_answer", {"topic": "GCD", "question": "gcd(84, 36)", "correct": True})
+    weak = text_of(await call("weak_topics"))
+    assert weak.startswith("RSA: 0/1 right (0%)")
+    assert "  - missed: Find d for e=3, phi=40 (used phi=55)" in weak
+    assert "GCD: 1/1 right (100%)" in weak

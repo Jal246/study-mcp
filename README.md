@@ -17,6 +17,8 @@ Everything runs locally: notes never leave the computer except as the snippets C
 | `grade_card` | Record how well I remembered a card (0–5); schedules the next review with SM-2 |
 | `delete_flashcard` | Remove a card |
 | `card_stats` | How many cards, how many due, reviews done today |
+| `record_quiz_answer` | Save each graded quiz answer by topic, with what went wrong |
+| `weak_topics` | Quiz accuracy by topic, weakest first, with recent mistakes: what to practice next |
 
 **Supported notes:** Markdown (`.md`), text (`.txt`), PDF (`.pdf`) and PowerPoint (`.pptx`, including tables, grouped shapes and speaker notes).
 
@@ -46,6 +48,7 @@ Then ask Claude things like:
 - "Explain Euclid's algorithm from my number theory slides"
 - "Give me 5 questions from the PDF and grade my answers"
 - "Make flashcards from module 4" / "Quiz me"
+- "What am I weakest at?" / "Give me practice on my weak topics"
 
 The first semantic search downloads the embedding model (~70 MB) and indexes your notes; after that it works offline, and only changed notes are re-indexed.
 
@@ -57,7 +60,7 @@ All optional, set as environment variables:
 |---|---|---|
 | `STUDY_NOTES_DIR` | `notes/` | Where your notes live |
 | `STUDY_CACHE_DIR` | `.cache/` | Downloaded model and saved search vectors (safe to delete; rebuilt automatically) |
-| `STUDY_DATA_DIR` | `data/` | Flashcards and review history (SQLite). **This is your own work: back it up.** |
+| `STUDY_DATA_DIR` | `data/` | Flashcards, review history and quiz history (SQLite). **This is your own work: back it up.** |
 
 ## Development
 

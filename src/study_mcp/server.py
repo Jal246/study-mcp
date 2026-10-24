@@ -25,6 +25,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from study_mcp.cambria_math import SMALL_GLYPHS
 from study_mcp.flashcards import Card, CardError, Deck
+from study_mcp.quiz import QuizError, QuizLog
 
 # Where the notes live. Override with the STUDY_NOTES_DIR environment variable.
 DEFAULT_NOTES_DIR = Path(__file__).resolve().parents[2] / "notes"
@@ -75,7 +76,10 @@ mcp = MCPServer(
         "Flashcards: when the user asks for cards, write short question/answer pairs from the "
         "notes and save each with add_flashcard (with its source). To quiz the user, call "
         "get_due_cards, ask ONE question at a time without showing the answer, wait for their "
-        "reply, tell them if they were right, then grade_card it before the next question."
+        "reply, tell them if they were right, then grade_card it before the next question. "
+        "Quizzes: when you write quiz questions yourself, save each graded answer with "
+        "record_quiz_answer (with a short topic name). When the user asks what to study, or "
+        "wants practice, check weak_topics first and focus on the weakest topics."
     ),
 )
 
@@ -585,4 +589,54 @@ def card_stats() -> str:
     if stats["struggling"]:
         lines.append("Forgotten most often:")
         lines += [f"#{c.id} ({c.lapses}x forgotten): {c.question}" for c in stats["struggling"]]
+    return "\n".join(lines)
+
+
+def _quiz_log() -> QuizLog:
+    return QuizLog(DATA_DIR / "quiz.db")
+
+
+@mcp.tool()
+def record_quiz_answer(
+    topic: str, question: str, correct: bool, source: str = "", mistake: str = ""
+) -> str:
+    """Save how the user did on one quiz question, so weak_topics can find what to practice.
+
+    Call this after grading each answer in a quiz you wrote (flashcards use grade_card instead).
+
+    Args:
+        topic: A short, reusable topic name, e.g. "RSA" or "Euclid's algorithm". Reuse the exact
+            names weak_topics already shows, so answers on the same topic group together.
+        question: The question asked.
+        correct: Whether the user got it right.
+        source: Where the question came from, e.g. "module4.pdf (page 25)".
+        mistake: For wrong answers, what went wrong in a few words, e.g. "forgot the minus sign".
+    """
+    try:
+        _quiz_log().record(topic, question, correct, source, mistake, date.today())
+    except QuizError as error:
+        raise ToolError(str(error)) from error
+    return f"Saved: {'right' if correct else 'wrong'} on {topic.strip()}."
+
+
+@mcp.tool()
+def weak_topics(days: int | None = None) -> str:
+    """Show the user's quiz scores by topic, weakest first, with their recent mistakes.
+
+    Use it when the user asks what to study or practice, and before making a practice quiz:
+    focus the questions on the weakest topics and their mistakes.
+
+    Args:
+        days: Only count the last this-many days (e.g. 7 for "this week"); omit for all time.
+    """
+    scores = _quiz_log().topics(date.today(), days)
+    if not scores:
+        return "No quiz answers saved yet."
+    lines = []
+    for s in scores:
+        lines.append(
+            f"{s.topic}: {s.correct}/{s.attempts} right ({s.accuracy:.0%}), "
+            f"last quizzed {s.last_answered.isoformat()}"
+        )
+        lines += [f"  - missed: {m}" for m in s.recent_mistakes]
     return "\n".join(lines)
