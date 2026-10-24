@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # The embedding model for semantic search (~70 MB) is downloaded on first use; keep it.
+      - uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: embedding-model-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+
+      - run: uv sync --locked
+
+      - run: uv run pytest -q
