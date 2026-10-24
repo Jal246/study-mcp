@@ -160,6 +160,114 @@ def _pdf_chars(textpage) -> list[_PdfChar]:
     return chars
 
 
+def _outlines(obj) -> list[tuple[list[tuple[float, float]], bool]]:
+    """The closed shapes of a filled path, in page coordinates, each with whether it has curves.
+    Curve control points are kept as corners: close enough to tell which way a shape leans."""
+    matrix, container = obj.get_matrix(), obj.container
+    while container is not None:  # paths inside a form are placed by the form's matrix too
+        matrix, container = matrix.multiply(container.get_matrix()), container.container
+    shapes: list[tuple[list[tuple[float, float]], bool]] = []
+    x, y = ctypes.c_float(), ctypes.c_float()
+    for i in range(pdfium_c.FPDFPath_CountSegments(obj.raw)):
+        segment = pdfium_c.FPDFPath_GetPathSegment(obj.raw, i)
+        pdfium_c.FPDFPathSegment_GetPoint(segment, ctypes.byref(x), ctypes.byref(y))
+        kind = pdfium_c.FPDFPathSegment_GetType(segment)
+        if kind == pdfium_c.FPDF_SEGMENT_MOVETO or not shapes:
+            shapes.append(([], False))
+        points, curved = shapes[-1]
+        points.append(matrix.on_point(x.value, y.value))
+        shapes[-1] = (points, curved or kind == pdfium_c.FPDF_SEGMENT_BEZIERTO)
+    return shapes
+
+
+def _delimiter_symbol(points: list[tuple[float, float]], curved: bool) -> str | None:
+    """Which bracket a shape is, if it looks like one: tall and thin, and heavier on one side.
+    ( and [ lean left (the curve's bulge, the bracket's stem); ) and ] lean right. Curves make
+    it a parenthesis; a straight one with only a bottom (or top) tick is a floor (or ceiling).
+    A shape that leans neither way (a bar, a table border) is not a bracket."""
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    width, height = max(xs) - min(xs), max(ys) - min(ys)
+    if len(points) < 3 or width <= 0 or width > 0.6 * height:
+        return None
+    area = moment = 0.0
+    for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1]):  # shoelace formula
+        cross = x1 * y2 - x2 * y1
+        area += cross
+        moment += (x1 + x2) * cross
+    if abs(area) < 1e-9:
+        return None
+    lean = (moment / (3 * area) - min(xs)) / width - 0.5  # centroid, -0.5 (left) to 0.5 (right)
+    if abs(lean) < 0.05:
+        return None
+    if curved:
+        return "(" if lean < 0 else ")"
+
+    def tick(edge: float) -> bool:  # a horizontal stroke along this edge, most of the width
+        xs_there = [x for x, y in points if abs(y - edge) < 0.15 * height]
+        return max(xs_there) - min(xs_there) > 0.5 * width
+
+    top, bottom = tick(max(ys)), tick(min(ys))
+    pair = "[]" if top == bottom else "⌊⌋" if bottom else "⌈⌉"
+    return pair[0] if lean < 0 else pair[1]
+
+
+def _pdf_delimiters(page, chars: list[_PdfChar], math_fonts: set[str]) -> list[_PdfChar]:
+    """Brackets in equations, as characters.
+
+    PowerPoint and Word draw the brackets around an equation's terms as shapes, not text (so they
+    can stretch to fit what's inside), and text extraction drops them: [72(−65) + 211] mod 7
+    would read as "72 −65 + 211 mod 7". We find bracket-shaped outlines sitting on a line of
+    equation text and turn them back into characters, placed beside the nearest equation glyph.
+    """
+    math = [c for c in chars if c.font in math_fonts and c.height > 0 and not chr(c.unit).isspace()]
+    if not math:
+        return []
+    found = []
+    for obj in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_PATH]):
+        for points, curved in _outlines(obj):
+            if not points:
+                continue
+            left, right = min(p[0] for p in points), max(p[0] for p in points)
+            bottom, top = min(p[1] for p in points), max(p[1] for p in points)
+            size = top - bottom
+            # Equation glyphs it wraps around: inside its height, at least a third as tall, close by.
+            near = [
+                c for c in math
+                if bottom - 0.5 <= c.y and c.y + c.height <= top + 0.5 and c.height > size / 3
+                and min(abs(c.left - right), abs(c.right - left)) < size
+            ]
+            if not near:
+                continue
+            symbol = _delimiter_symbol(points, curved)
+            if symbol is None:
+                continue
+            # Sit on the line's baseline, not a sub/superscript's: the ) in (a₁a₀)₂ comes before the ₂.
+            near = [c for c in near if c.unit not in SMALL_GLYPHS] or near
+            nearest = min(near, key=lambda c: min(abs(c.left - right), abs(c.right - left)))
+            found.append(_PdfChar(ord(symbol), "", nearest.y, nearest.height, left, right, False))
+    return found
+
+
+def _with_delimiters(chars: list[_PdfChar], delimiters: list[_PdfChar]) -> list[_PdfChar]:
+    """`chars` with each bracket put in reading order: an opening one before the first glyph of its
+    line to its right, a closing one after the last glyph to its left."""
+    chars = list(chars)
+    for bracket in sorted(delimiters, key=lambda c: c.left):
+        middle = (bracket.left + bracket.right) / 2
+        line = [
+            i for i, c in enumerate(chars)
+            if not c.generated and abs(c.y - bracket.y) < bracket.height and c.height > 0
+        ]
+        if chr(bracket.unit) in "([⌊⌈":
+            right = [i for i in line if chars[i].left >= middle]
+            at = right[0] if right else (line[-1] + 1 if line else len(chars))
+        else:
+            left = [i for i in line if chars[i].left < middle]
+            at = left[-1] + 1 if left else (line[0] if line else len(chars))
+        chars.insert(at, bracket)
+    return chars
+
+
 def _shifted(char: _PdfChar, before: _PdfChar | None) -> bool:
     """Is `char` raised or lowered next to the character before it, like the 27 in 15²⁷ typed as
     ordinary text with superscript formatting? It must sit right after that character: a shift
@@ -234,8 +342,12 @@ def _fix_math(chars: list[_PdfChar], math_fonts: set[str]) -> str:
 def _pdf_pages(path: Path) -> list[str]:
     with pdfium.PdfDocument(path) as pdf:
         pages = [_pdf_chars(page.get_textpage()) for page in pdf]
-    # 0xD835 starts every math letter (𝑥, 𝑚, 𝛼): fonts using them are equation fonts.
-    math_fonts = {char.font for page in pages for char in page if char.unit == 0xD835}
+        # 0xD835 starts every math letter (𝑥, 𝑚, 𝛼): fonts using them are equation fonts.
+        math_fonts = {char.font for page in pages for char in page if char.unit == 0xD835}
+        pages = [
+            _with_delimiters(chars, _pdf_delimiters(page, chars, math_fonts))
+            for page, chars in zip(pdf, pages)
+        ]
     return [_fix_math(page, math_fonts) for page in pages]
 
 

@@ -257,6 +257,55 @@ def test_fix_math_ignores_text_that_is_not_next_to_the_line():
     assert server._fix_math(chars + [far], set()) == "Return(p)8"
 
 
+def test_delimiter_symbol_tells_brackets_apart():
+    # Outlines as PowerPoint draws them, 12 tall: stems, ticks and curves.
+    bracket = [(0, 0), (3, 0), (3, 1), (1, 1), (1, 11), (3, 11), (3, 12), (0, 12)]
+    floor = [(0, 0), (3, 0), (3, 1), (1, 1), (1, 12), (0, 12)]
+    paren = [  # a ), from a real lecture PDF
+        (0, 0), (1.28, 0.32), (2.24, 0.96), (2.88, 2.08), (3.52, 3.2), (3.84, 4.48), (3.84, 6.08),
+        (3.84, 7.68), (3.52, 8.96), (2.88, 10.08), (2.24, 11.2), (1.28, 11.84), (0, 12.32),
+        (-0.16, 11.68), (0.8, 11.36), (1.6, 10.72), (2.08, 9.76), (2.56, 8.8), (2.72, 7.52),
+        (2.72, 6.08), (2.72, 4.64), (2.56, 3.36), (2.08, 2.4), (1.6, 1.44), (0.8, 0.8), (-0.16, 0.48),
+    ]
+
+    def mirrored(points):
+        return [(-x, y) for x, y in points]
+
+    assert server._delimiter_symbol(bracket, curved=False) == "["
+    assert server._delimiter_symbol(mirrored(bracket), curved=False) == "]"
+    assert server._delimiter_symbol(floor, curved=False) == "⌊"
+    assert server._delimiter_symbol(mirrored(floor), curved=False) == "⌋"
+    assert server._delimiter_symbol(paren, curved=True) == ")"
+    assert server._delimiter_symbol(mirrored(paren), curved=True) == "("
+
+
+def test_delimiter_symbol_ignores_shapes_that_are_not_brackets():
+    bar = [(0, 0), (1, 0), (1, 12), (0, 12)]  # leans neither way, like a table border
+    wide = [(0, 0), (30, 0), (30, 1), (1, 1), (1, 11), (30, 11), (30, 12), (0, 12)]
+    assert server._delimiter_symbol(bar, curved=False) is None
+    assert server._delimiter_symbol(wide, curved=False) is None
+
+
+def test_drawn_brackets_go_back_into_the_text():
+    # (x+y) mod m, with the brackets drawn as shapes just outside x and y.
+    chars = pdf_line(("x+y mod m", 0.0), font="Body")
+    brackets = [
+        server._PdfChar(ord("("), "", 0.0, 10.0, -6.0, -2.0, False),
+        server._PdfChar(ord(")"), "", 0.0, 10.0, 28.0, 31.0, False),
+    ]
+    assert server._fix_math(server._with_delimiters(chars, brackets), set()) == "(x+y) mod m"
+
+
+def test_drawn_bracket_closes_a_subscript_before_it():
+    # (a₀)₂: the ) sits on the baseline between the two subscripts.
+    chars = pdf_line(("a", 0.0), ([0xB34], -2.0), ([0xB36], -2.0))
+    brackets = [
+        server._PdfChar(ord("("), "", 0.0, 10.0, -6.0, -2.0, False),
+        server._PdfChar(ord(")"), "", 0.0, 10.0, 17.0, 21.0, False),
+    ]
+    assert server._fix_math(server._with_delimiters(chars, brackets), {"Math"}) == "(a_{0})_{2}"
+
+
 async def test_flashcard_quiz_round_trip():
     added = text_of(await call("add_flashcard", {
         "question": "What data structure does BFS use?",
