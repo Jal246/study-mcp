@@ -3,6 +3,7 @@
 Gives an AI assistant (like Claude) tools to browse and search your study notes.
 """
 
+import ctypes
 import hashlib
 import logging
 import os
@@ -18,9 +19,11 @@ import numpy as np
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 import pypdfium2 as pdfium
+import pypdfium2.raw as pdfium_c
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
+from study_mcp.cambria_math import SMALL_GLYPHS
 from study_mcp.flashcards import Card, CardError, Deck
 
 # Where the notes live. Override with the STUDY_NOTES_DIR environment variable.
@@ -117,6 +120,117 @@ def _slide_texts(path: Path) -> list[str]:
     return texts
 
 
+@dataclass
+class _PdfChar:
+    unit: int  # one UTF-16 code unit, as pdfium reports it
+    font: str
+    y: float  # baseline height on the page, to tell superscripts from subscripts
+    height: float  # height of the glyph's box, to judge how far a raised character moved
+    left: float
+    right: float
+    generated: bool  # a space or line break pdfium added, not text in the file
+
+
+def _pdf_chars(textpage) -> list[_PdfChar]:
+    chars = []
+    for i in range(pdfium_c.FPDFText_CountChars(textpage.raw)):
+        font = ctypes.create_string_buffer(256)
+        pdfium_c.FPDFText_GetFontInfo(textpage.raw, i, font, len(font), None)
+        x, y = ctypes.c_double(), ctypes.c_double()
+        pdfium_c.FPDFText_GetCharOrigin(textpage.raw, i, ctypes.byref(x), ctypes.byref(y))
+        box = [ctypes.c_double() for _ in range(4)]  # left, right, bottom, top
+        pdfium_c.FPDFText_GetCharBox(textpage.raw, i, *(ctypes.byref(b) for b in box))
+        chars.append(_PdfChar(
+            pdfium_c.FPDFText_GetUnicode(textpage.raw, i),
+            font.value.decode(errors="replace"),
+            y.value,
+            box[3].value - box[2].value,
+            box[0].value,
+            box[1].value,
+            bool(pdfium_c.FPDFText_IsGenerated(textpage.raw, i)),
+        ))
+    return chars
+
+
+def _shifted(char: _PdfChar, before: _PdfChar | None) -> bool:
+    """Is `char` raised or lowered next to the character before it, like the 27 in 15²⁷ typed as
+    ordinary text with superscript formatting? It must sit right after that character: a shift
+    of more than a glyph's height, or a gap, means the text moved somewhere else on the page
+    (like a slide number)."""
+    if before is None or before.height <= 0:
+        return False
+    touching = abs(char.left - before.right) < 0.5 * before.height
+    return touching and 0.1 * before.height < abs(char.y - before.y) < 0.7 * before.height
+
+
+def _fix_math(chars: list[_PdfChar], math_fonts: set[str]) -> str:
+    """A page's text, with superscripts and subscripts marked and broken equation glyphs repaired.
+
+    PowerPoint and Word draw small equation glyphs (the 17 in 6¹⁷) from Cambria Math, and their
+    PDF export writes the glyph's number instead of a character, so 6¹⁷ comes out as "6ଵ଻".
+    We swap those back using SMALL_GLYPHS. Only fonts that also contain math letters (𝑥, 𝑚𝑜𝑑)
+    are touched, so real Odia or Tamil text is left alone. Plain text has no superscripts, so
+    without marks 6¹⁷ would read as 617; we mark them the way LaTeX does: "6^{17}",
+    "p_{1}^{α_{1}}".
+    """
+    pieces: list[str] = []
+    open_groups: list[str] = []  # "^" or "_" for each open "{"; index + 1 is the level
+    base_y = [0.0, 0.0, 0.0]  # baseline of the last character at each level (0 = normal size)
+    before: _PdfChar | None = None  # last normal-size character on this line
+
+    def close_to(depth: int) -> None:
+        while len(open_groups) > depth:
+            open_groups.pop()
+            pieces.append("}")
+
+    for char in chars:
+        text = chr(char.unit)
+        if char.generated or text.isspace():
+            close_to(0)
+            pieces.append(text)
+            if text in "\r\n":
+                before = None
+            continue
+        small = SMALL_GLYPHS.get(char.unit) if char.font in math_fonts else None
+        if small is not None:
+            text, level = small
+        else:
+            # A normal glyph at the height of an open superscript is part of it: the ( in p^{min(α,β)}.
+            level = next(
+                (n for n in range(len(open_groups), 0, -1) if abs(char.y - base_y[n]) < 0.3), 0
+            )
+            if level == 0 and _shifted(char, before):
+                level = 1
+        if level == 0:
+            close_to(0)
+            pieces.append(text)
+            base_y[0] = char.y
+            before = char
+            continue
+        mark = "^" if char.y > base_y[level - 1] else "_"
+        if len(open_groups) >= level and open_groups[level - 1] == mark:
+            close_to(level)  # back from a deeper level: the "," after α₁ in min(α₁,β₁)
+        else:
+            close_to(level - 1)
+            # pdfium often puts a line break between a letter and its raised exponent.
+            while not open_groups and pieces and pieces[-1].isspace():
+                pieces.pop()
+            pieces.append(mark + "{")
+            open_groups.append(mark)
+        pieces.append(text)
+        base_y[level] = char.y
+    close_to(0)
+    return "".join(pieces).encode("utf-16", "surrogatepass").decode("utf-16")
+
+
+def _pdf_pages(path: Path) -> list[str]:
+    with pdfium.PdfDocument(path) as pdf:
+        pages = [_pdf_chars(page.get_textpage()) for page in pdf]
+    # 0xD835 starts every math letter (𝑥, 𝑚, 𝛼): fonts using them are equation fonts.
+    math_fonts = {char.font for page in pages for char in page if char.unit == 0xD835}
+    return [_fix_math(page, math_fonts) for page in pages]
+
+
 @lru_cache(maxsize=64)
 def _load_pages(path: Path, modified_ns: int) -> list[str]:
     """Return a note's text as a list of pages or slides (text files count as one page).
@@ -126,8 +240,7 @@ def _load_pages(path: Path, modified_ns: int) -> list[str]:
     """
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        with pdfium.PdfDocument(path) as pdf:
-            return [_normalize(page.get_textpage().get_text_range()) for page in pdf]
+        return [_normalize(text) for text in _pdf_pages(path)]
     if suffix == ".pptx":
         return [_normalize(text) for text in _slide_texts(path)]
     return [_normalize(path.read_text(encoding="utf-8"))]

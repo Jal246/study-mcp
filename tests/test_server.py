@@ -210,6 +210,48 @@ def test_split_cuts_between_lines_and_keeps_line_numbers():
     assert server._split("\n\n  \n") == []
 
 
+def pdf_line(*runs: tuple[str | list[int], float], font: str = "Math") -> list[server._PdfChar]:
+    """Characters side by side on one line. Each run is (text or code units, baseline height)."""
+    chars = []
+    for text, y in runs:
+        for unit in text if isinstance(text, list) else map(ord, text):
+            x = 10.0 * len(chars)
+            chars.append(server._PdfChar(unit, font, y, 10.0, x, x + 10.0, False))
+    return chars
+
+
+def test_fix_math_repairs_equation_superscripts():
+    # 6¹⁷ as PowerPoint exports it: the 17 comes out as glyph numbers 0xB35, 0xB3B ("ଵ଻").
+    chars = pdf_line(("6", 0.0), ([0xB35, 0xB3B], 3.0), (" mod 16", 0.0))
+    assert server._fix_math(chars, {"Math"}) == "6^{17} mod 16"
+
+
+def test_fix_math_nests_subscripts_inside_superscripts():
+    # p₁^min(α₁,β₁): "min" is small glyphs; ( , ) are normal glyphs at the exponent's height.
+    chars = pdf_line(
+        ("p", 0.0), ([0xB35], -2.0), ([0xB6B, 0xB67, 0xB6C], 5.0), ("(", 5.0), ([0xC08], 5.0),
+        ([0xC2D], 4.0), (",", 5.0), ([0xC09], 5.0), ([0xC2D], 4.0), (")", 5.0),
+    )
+    assert server._fix_math(chars, {"Math"}) == "p_{1}^{min(𝛼_{1},𝛽_{1})}"
+
+
+def test_fix_math_leaves_real_odia_text_alone():
+    odia = [0xB35, 0xB3B]
+    assert server._fix_math(pdf_line((odia, 0.0), font="Odia"), {"Math"}) == "ଵ଻"
+
+
+def test_fix_math_marks_superscripts_typed_as_ordinary_text():
+    chars = pdf_line(("15", 0.0), ("27", 3.0), (" mod 12", 0.0), font="Body")
+    assert server._fix_math(chars, set()) == "15^{27} mod 12"
+
+
+def test_fix_math_ignores_text_that_is_not_next_to_the_line():
+    # A slide number sitting slightly lower, far to the right, is not a subscript.
+    chars = pdf_line(("Return(p)", 0.0), font="Body")
+    far = server._PdfChar(ord("8"), "Body", -3.0, 10.0, 500.0, 510.0, False)
+    assert server._fix_math(chars + [far], set()) == "Return(p)8"
+
+
 async def test_flashcard_quiz_round_trip():
     added = text_of(await call("add_flashcard", {
         "question": "What data structure does BFS use?",
