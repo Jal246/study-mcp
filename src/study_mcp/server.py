@@ -24,6 +24,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from study_mcp.cambria_math import SMALL_GLYPHS
+from study_mcp.exams import ExamError, ExamList
 from study_mcp.flashcards import Card, CardError, Deck
 from study_mcp.quiz import QuizError, QuizLog
 
@@ -79,7 +80,10 @@ mcp = MCPServer(
         "reply, tell them if they were right, then grade_card it before the next question. "
         "Quizzes: when you write quiz questions yourself, save each graded answer with "
         "record_quiz_answer (with a short topic name). When the user asks what to study, or "
-        "wants practice, check weak_topics first and focus on the weakest topics."
+        "wants practice, check weak_topics first and focus on the weakest topics. "
+        "Exams: when the user mentions an exam date, save it with add_exam. When planning study, "
+        "check upcoming_exams and prioritize what the next exam covers; close to an exam, review "
+        "its flashcards with get_due_cards(source=..., cram=True)."
     ),
 )
 
@@ -532,7 +536,7 @@ def add_flashcard(question: str, answer: str, source: str = "") -> str:
 
 
 @mcp.tool()
-def get_due_cards(limit: int = 10) -> str:
+def get_due_cards(limit: int = 10, source: str = "", cram: bool = False) -> str:
     """List the flashcards due for review today, most overdue first, with their answers.
 
     The answers are for you to check the user's reply: ask the questions one at a time and don't
@@ -540,11 +544,13 @@ def get_due_cards(limit: int = 10) -> str:
 
     Args:
         limit: Maximum number of cards to return.
+        source: Only cards from notes whose source contains this text, e.g. "Module 4".
+        cram: Also include cards not due yet, for reviewing everything before an exam.
     """
-    cards = _deck().due(date.today(), limit)
+    cards = _deck().due(date.today(), limit, source, cram)
     if not cards:
-        return "No cards due today."
-    lines = [f"{len(cards)} cards due:"]
+        return "No cards to review." if source or cram else "No cards due today."
+    lines = [f"{len(cards)} cards {'to review' if cram else 'due'}:"]
     for card in cards:
         source = f" [{card.source}]" if card.source else ""
         lines.append(f"#{card.id}{source}\nQ: {card.question}\nA: {card.answer}")
@@ -640,3 +646,55 @@ def weak_topics(days: int | None = None) -> str:
         )
         lines += [f"  - missed: {m}" for m in s.recent_mistakes]
     return "\n".join(lines)
+
+
+def _exams() -> ExamList:
+    return ExamList(DATA_DIR / "exams.db")
+
+
+def _days_left(day: date) -> str:
+    days = (day - date.today()).days
+    return "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days"
+
+
+@mcp.tool()
+def add_exam(name: str, exam_date: str, covers: str = "") -> str:
+    """Save an upcoming exam, so studying can focus on what it covers.
+
+    Args:
+        name: E.g. "Discrete Math midterm".
+        exam_date: The date as YYYY-MM-DD, e.g. "2026-11-10".
+        covers: Notes or topics on the exam, e.g. "Module 3-4, RSA".
+    """
+    try:
+        exam = _exams().add(name, exam_date, covers, date.today())
+    except ExamError as error:
+        raise ToolError(str(error)) from error
+    return f"Saved exam #{exam.id}: {exam.name} on {exam.on_date.isoformat()} ({_days_left(exam.on_date)})."
+
+
+@mcp.tool()
+def upcoming_exams() -> str:
+    """List upcoming exams, soonest first, with days left and what each covers."""
+    exams = _exams().upcoming(date.today())
+    if not exams:
+        return "No upcoming exams saved."
+    return "\n".join(
+        f"#{e.id} {e.name}: {e.on_date.isoformat()} ({_days_left(e.on_date)})"
+        + (f", covers {e.covers}" if e.covers else "")
+        for e in exams
+    )
+
+
+@mcp.tool()
+def delete_exam(exam_id: int) -> str:
+    """Delete a saved exam (e.g. one entered by mistake).
+
+    Args:
+        exam_id: The exam's number, from upcoming_exams.
+    """
+    try:
+        exam = _exams().delete(exam_id)
+    except ExamError as error:
+        raise ToolError(str(error)) from error
+    return f"Deleted exam #{exam.id}: {exam.name}"

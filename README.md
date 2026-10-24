@@ -13,12 +13,13 @@ Everything runs locally: notes never leave the computer except as the snippets C
 | `search_notes` | Find an exact word, term or formula |
 | `semantic_search` | Find notes by meaning ("how do I find a remainder?" finds the slide on `n mod d`) |
 | `add_flashcard` | Save a question/answer card, with where it came from |
-| `get_due_cards` | Cards due for review today |
+| `get_due_cards` | Cards due for review today; filter by note, or `cram` to review cards before they're due |
 | `grade_card` | Record how well I remembered a card (0–5); schedules the next review with SM-2 |
 | `delete_flashcard` | Remove a card |
 | `card_stats` | How many cards, how many due, reviews done today |
 | `record_quiz_answer` | Save each graded quiz answer by topic, with what went wrong |
 | `weak_topics` | Quiz accuracy by topic, weakest first, with recent mistakes: what to practice next |
+| `add_exam` / `upcoming_exams` / `delete_exam` | Exam dates and what they cover, so studying focuses on what's next |
 
 **Supported notes:** Markdown (`.md`), text (`.txt`), PDF (`.pdf`) and PowerPoint (`.pptx`, including tables, grouped shapes and speaker notes).
 
@@ -49,6 +50,7 @@ Then ask Claude things like:
 - "Give me 5 questions from the PDF and grade my answers"
 - "Make flashcards from module 4" / "Quiz me"
 - "What am I weakest at?" / "Give me practice on my weak topics"
+- "My discrete math midterm is Nov 10, it covers modules 3 and 4" / "What should I study today?"
 
 The first semantic search downloads the embedding model (~70 MB) and indexes your notes; after that it works offline, and only changed notes are re-indexed.
 
@@ -60,7 +62,7 @@ All optional, set as environment variables:
 |---|---|---|
 | `STUDY_NOTES_DIR` | `notes/` | Where your notes live |
 | `STUDY_CACHE_DIR` | `.cache/` | Downloaded model and saved search vectors (safe to delete; rebuilt automatically) |
-| `STUDY_DATA_DIR` | `data/` | Flashcards, review history and quiz history (SQLite). **This is your own work: back it up.** |
+| `STUDY_DATA_DIR` | `data/` | Flashcards, review history, quiz history and exams (SQLite). **This is your own work: back it up.** |
 
 ## Development
 

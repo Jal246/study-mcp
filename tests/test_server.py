@@ -50,6 +50,9 @@ async def test_lists_all_tools():
             "card_stats",
             "record_quiz_answer",
             "weak_topics",
+            "add_exam",
+            "upcoming_exams",
+            "delete_exam",
         }
 
 
@@ -296,3 +299,22 @@ async def test_quiz_answers_show_up_in_weak_topics():
     assert weak.startswith("RSA: 0/1 right (0%)")
     assert "  - missed: Find d for e=3, phi=40 (used phi=55)" in weak
     assert "GCD: 1/1 right (100%)" in weak
+
+
+async def test_exams_round_trip():
+    assert text_of(await call("upcoming_exams")) == "No upcoming exams saved."
+    saved = text_of(await call("add_exam", {"name": "Final", "exam_date": "2999-01-01", "covers": "RSA"}))
+    assert saved.startswith("Saved exam #1: Final on 2999-01-01 (in ")
+    assert "#1 Final: 2999-01-01 (in " in text_of(await call("upcoming_exams"))
+    assert ", covers RSA" in text_of(await call("upcoming_exams"))
+    bad = await call("add_exam", {"name": "Old", "exam_date": "2000-01-01"})
+    assert bad.is_error and "in the past" in text_of(bad)
+    assert text_of(await call("delete_exam", {"exam_id": 1})) == "Deleted exam #1: Final"
+
+
+async def test_cram_reviews_cards_before_they_are_due():
+    await call("add_flashcard", {"question": "Q", "answer": "A", "source": "math/module4.pdf (page 2)"})
+    await call("grade_card", {"card_id": 1, "quality": 5})
+    assert text_of(await call("get_due_cards")) == "No cards due today."
+    crammed = text_of(await call("get_due_cards", {"source": "module4", "cram": True}))
+    assert crammed.startswith("1 cards to review:")

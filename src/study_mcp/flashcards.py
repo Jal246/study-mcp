@@ -147,11 +147,20 @@ class Deck:
             )
             return self._get(conn, cursor.lastrowid)
 
-    def due(self, today: date, limit: int) -> list[Card]:
-        """Cards due today or earlier, most overdue first."""
+    def due(self, today: date, limit: int, source: str = "", cram: bool = False) -> list[Card]:
+        """Cards due today or earlier, most overdue first.
+
+        Args:
+            source: Only cards whose source contains this text (any case), e.g. "Module 4".
+            cram: Also include cards not due yet (soonest first), for reviewing before an exam.
+        """
+        # In LIKE, % and _ are wildcards; escape them so "10_22" means a literal underscore.
+        pattern = "%" + source.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         with self._db() as conn:
             rows = conn.execute(
-                "SELECT * FROM cards WHERE due <= ? ORDER BY due, id LIMIT ?", (today.isoformat(), limit)
+                "SELECT * FROM cards WHERE (due <= ? OR ?) AND source LIKE ? ESCAPE '\\' "
+                "ORDER BY due, id LIMIT ?",
+                (today.isoformat(), cram, pattern, limit),
             ).fetchall()
             return [_card(row) for row in rows]
 

@@ -106,3 +106,13 @@ def test_stats_and_delete(deck):
     deck.delete(hard.id)  # Its reviews go with it (ON DELETE CASCADE).
     stats = deck.stats(DAY0)
     assert (stats["total"], stats["reviewed_today"], stats["struggling"]) == (1, 0, [])
+
+
+def test_due_filters_by_source_and_cram_adds_cards_not_due(deck):
+    math = deck.add("Q1", "A", "Module 4 (10_22).pdf (page 9)", DAY0)
+    deck.add("Q2", "A", "biology/photosynthesis.md", DAY0)
+    deck.grade(math.id, 5, DAY0)  # Now due tomorrow.
+    assert [c.question for c in deck.due(DAY0, 10)] == ["Q2"]
+    assert deck.due(DAY0, 10, source="module 4") == []
+    assert [c.question for c in deck.due(DAY0, 10, source="module 4", cram=True)] == ["Q1"]
+    assert deck.due(DAY0, 10, source="10%22", cram=True) == []  # % is literal, not a wildcard.
